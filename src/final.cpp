@@ -49,6 +49,8 @@ static struct NUR_API_HANDLE gApi =
   NULL  // struct NUR_CMD_RESP *resp;
 };
 
+//struct NUR_CMD_WRITE_PARAMS writeParams;
+
 const char* ssid = "HomeAutomation";
 const char* password = "TaloAutomaatio";
 const char* mqtt_server = "192.168.0.110";
@@ -57,11 +59,13 @@ I2CGPS myGPS;
 T9602 T9602;
 TinyGPSPlus gps;
 WiFiClient espClient;
-PubSubClient client(espClient);
+PubSubClient client1(espClient);
 SoftwareSerial swSerial(D3, D4); // RX, TX
 
 String strReceivedMsg;
 String strReceivedTopic;
+String oldEPC;
+String newEPC;
 
 unsigned long startMillis;  //some global variables available anywhere in the program
 unsigned long currentMillis;
@@ -71,10 +75,9 @@ void setup_wifi();
 void callback(char* topic, byte* payload, unsigned int length);
 void reconnect();
 
-Adafruit_ADS1115 ads(0x48);
-float Voltage0, Voltage1, dryMatter0, dryMatter1;
-
-
+Adafruit_ADS1115 ads(0x48); // ads1115's i2c id when addr pin is grounded
+float Voltage0, Voltage1, proximity, dryMatter;
+String epc = "";
 
 void setup_wifi() {
   delay(10);
@@ -119,21 +122,16 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
         int16_t adc0;  // we read from the ADC, we have a sixteen bit integer as a result
         int16_t adc1; 
-        //adc0 = ads.readADC_SingleEnded(0);
-        
-        adc1 = ads.readADC_SingleEnded(1);
-        //Serial.println(adc0);
-        //Voltage0 = (adc0 * 0.1875)/1000;
+        adc0 = ads.readADC_SingleEnded(0); //proximity
+        adc1 = ads.readADC_SingleEnded(1); //dry matter
+        Voltage0 = (adc0 * 0.1875)/1000;
         Voltage1 = (adc1 * 0.1875)/1000;
-        //Serial.print("Humidity: ");
-        //dryMatter0 = Voltage0*70/5;
-        dryMatter1 = Voltage1*70/5;
-        dryMatter1 = roundf(dryMatter1 *100)/100;
-        //Serial.println(dryMatter0);
-        json["dryMatter"] = dryMatter1;
-        Serial.println(dryMatter1);
-        //json["dryMatter1"] = dryMatter1;
-            
+        proximity = Voltage0*100/5;
+        dryMatter = roundf(Voltage1*70/5*100)/100;
+        json["dryMatter"] = dryMatter;
+        //json["proximity"] = proximity;
+        Serial.println(dryMatter);
+        Serial.println(proximity);
         while (myGPS.available()) //available() returns the number of new bytes available from the GPS module
         {
            gps.encode(myGPS.read());
@@ -155,26 +153,41 @@ void callback(char* topic, byte* payload, unsigned int length) {
         json["lat"] = gps.location.lat();
         json.printTo(result_str);
         Serial.println(result_str);
-        client.publish("todatabase", result_str);
+        client1.publish("todatabase", result_str);
+        delay(500);
     }
+  if (strReceivedTopic == "changeEPC"){
+    for (i = 2; i < 26; i++) {
+      oldEPC.concat((char)payload[i]);
+    }
+    for (i = 29; i < 53; i++) {
+      newEPC.concat((char)payload[i]);
+    }
+    Serial.println(oldEPC);
+    Serial.println(newEPC);
+    //int rc = NurApiWriteTag(&gApi,  &writeParams);
+  }
   strReceivedMsg = "";
+  oldEPC = "";
+  newEPC = "";
   Serial.println();
 }
 
 void reconnect() {
   // Loop until we're reconnected
-  while (!client.connected()) {
+  while (!client1.connected()) {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
-    if (client.connect("ESP8266Client")) 
+    if (client1.connect("ESP8266Client1")) 
       {
         Serial.println("connected");
-        client.subscribe("sensors");
+        client1.subscribe("sensors");
+        client1.subscribe("changeEPC");
         startMillis = millis();  //initial start time
       }
       else {
         Serial.print("failed, rc=");
-        Serial.print(client.state());
+        Serial.print(client1.state());
         Serial.println(" try again in 5 seconds");
         // Wait 5 seconds before retryingco
         delay(5000);
@@ -288,7 +301,7 @@ static void nur_configure_module()
   // Enable antenna 0.
   // Use bit operation if you want to enable multiple
   // antennas like antenna 0 and 1 (NUR_ANTENNAMASK_1 | NUR_ANTENNAMASK_2)
-  params.antennaMask = NUR_ANTENNAMASK_2;
+  params.antennaMask = NUR_ANTENNAMASK_3 | NUR_ANTENNAID_4;
   // Set antenna selection to auto mode
   params.selectedAntenna = NUR_ANTENNAID_AUTOSELECT;
 #ifdef PrintSerial
@@ -316,6 +329,7 @@ void print_hex(int val) {
   char tmp[3];
   sprintf(tmp, "%02X", val);
   PrintSerial.print(tmp);
+  epc = epc + tmp;
 }
 #endif
 
@@ -336,19 +350,18 @@ int nur_fetch_tags_function(struct NUR_API_HANDLE *hNurApi, struct NUR_IDBUFFER_
   DynamicJsonBuffer jsonBuffer;
   JsonObject& json = jsonBuffer.createObject();
   json["rssi"] = tag->scaledRssi;
-  String epc = "";
+  
   for (n = 0; n < tag->epcLen; n++) {
     print_hex(tag->epcData[n]);
-    epc = epc + tag->epcData[n];
+    //epc = epc + tag->epcData[n];
   }
-  
   json["id"] = epc;
   json.printTo(result_str);
   //Serial.println(result_str);
-  client.publish("nurapisample/epc", result_str);
-  PrintSerial.println("");
+  client1.publish("nurapisample/epc", result_str);
+  epc = "";
+  Serial.println();
 #endif
-
   return NUR_SUCCESS; // non-zero terminates tag buffer parsing
 }
 
@@ -365,11 +378,14 @@ void nur_tag_inventory()
 #endif
 
   // Clear tag buffer
+  yield();
   rc = NurApiClearTags(&gApi);
+
   if (rc == NUR_SUCCESS)
   {
     // Perform tag inventory
     rc = NurApiInventory(&gApi, NULL); // Pass NULL as params, uses default inventory settings from module setup
+    yield();
     if (rc == NUR_SUCCESS)
     {
       // Fetch tags one by one
@@ -378,12 +394,14 @@ void nur_tag_inventory()
       for (n = 0; n < tagCount; n++)
       {
         rc = NurApiFetchTagAt(&gApi, TRUE, n, nur_fetch_tags_function);
+        delay(0);
         if (rc != NUR_SUCCESS) {
           break;
         }
       }
 #ifdef PrintSerial
       PrintSerial.println(F("Inventory done"));
+      yield();
 #endif
     }
     else {
@@ -406,9 +424,8 @@ void nur_tag_inventory()
 
 void setup(){
   Serial.begin(38400);
-  setup_wifi();
-  client.setServer(mqtt_server, 1883);
-  client.setCallback(callback);
+
+  
   Wire.begin();
   if (myGPS.begin() == false)
   {
@@ -416,6 +433,9 @@ void setup(){
      //Freeze!
   } else Serial.println("GPS module found!");
   ads.begin();
+
+  /* writeParams.flags = 0;
+  writeParams.passwd = 0;*/
 
   void enableIntTx(bool on);
   // Disable or enable interrupts on the rx pin
@@ -449,20 +469,24 @@ void setup(){
     PrintSerial.println(F("NUR NOT DETECTED"));
 #endif
   }
+  setup_wifi();
+  client1.setServer(mqtt_server, 1883);
+  client1.setCallback(callback);
 }
 
 void loop(){
-  if (!client.connected()) reconnect();
-  client.loop();
-  
+  if (!client1.connected()) reconnect();
+  client1.loop();
+
   if (!NurAvailable)
   {
-    digitalWrite(LED_BUILTIN, HIGH);   // turn the LED on (HIGH is the voltage level)
+    /*digitalWrite(LED_BUILTIN, HIGH);   // turn the LED on (HIGH is the voltage level)
     delay(100);                       // wait for a 100ms
     digitalWrite(LED_BUILTIN, LOW);    // turn the LED off by making the voltage LOW
-    delay(100);                       // wait for a 100ms
+    delay(100); */                      // wait for a 100ms
     #ifdef PrintSerial
     PrintSerial.println(F("ERROR"));
+    yield();
     #endif
     return;
   }
@@ -470,17 +494,20 @@ void loop(){
   digitalWrite(LED_BUILTIN, HIGH);   // turn the LED on (HIGH is the voltage level)
   nur_tag_inventory();               // perform tag inventory
   digitalWrite(LED_BUILTIN, LOW);    // turn the LED off by making the voltage LOW
-  delay(500);          
+  delay(100);          
 
   currentMillis = millis();  //get the current "time" (actually the number of milliseconds since the program started)
   if (currentMillis - startMillis >= period)  //test whether the period has elapsed
   {
+    delay(0);
+    yield();
     static char result_str[500] = "";
     DynamicJsonBuffer jsonBuffer;
     JsonObject& json = jsonBuffer.createObject();
      while (myGPS.available()) //available() returns the number of new bytes available from the GPS module
     {
        gps.encode(myGPS.read());
+       yield();
     }
       if (gps.location.isValid())
     {
@@ -489,6 +516,7 @@ void loop(){
       Serial.print(F(", "));
       Serial.print(gps.location.lng(), 6);
       Serial.println();
+
     }
     else
     {
@@ -499,7 +527,7 @@ void loop(){
     json["lat"] = gps.location.lat();
     json.printTo(result_str);
     Serial.println(result_str);
-    client.publish("outTopic3", result_str); 
+    client1.publish("outTopic3", result_str); 
     startMillis = currentMillis;  //IMPORTANT to save the start time of the current LED state.
   }
  }
