@@ -174,7 +174,7 @@ void loop(){
     json["lat"] = gps.location.lat();
     json.printTo(result_str);
     Serial.println(result_str);
-    client1.publish("outTopic3", result_str); 
+    client1.publish("path", result_str); 
     startMillis = currentMillis;  //IMPORTANT to save the start time of the current LED state.
   }
  }
